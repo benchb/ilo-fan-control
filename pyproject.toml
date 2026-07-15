@@ -1,0 +1,17 @@
+[project]
+name = "ilo-fan-control"
+version = "0.2.0"
+description = "Web application for monitoring and controlling HPE iLO fan speeds"
+readme = "README.md"
+requires-python = ">=3.13"
+authors = [
+    { name = "Alexandre Geraldo" }
+]
+dependencies = []
+
+[project.scripts]
+ilo-fan-control = "ilo_fan_control:main"
+
+[build-system]
+requires = ["uv_build>=0.11.28,<0.12.0"]
+build-backend = "uv_build"

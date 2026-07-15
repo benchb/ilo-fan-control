@@ -1,0 +1,1 @@
+"""iLO Fan Control application."""
