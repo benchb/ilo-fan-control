@@ -1,0 +1,35 @@
+# Fan speed applied to all enabled fans when Silent mode is selected.
+silent_fan_speed = 20
+
+# Fan IDs must correspond to the IDs used by iLO.
+# Do not change an ID after profiles have been created.
+
+[[fans]]
+id = 0
+name = "Fan 1"
+enabled = true
+
+[[fans]]
+id = 1
+name = "Fan 2"
+enabled = true
+
+[[fans]]
+id = 2
+name = "Fan 3"
+enabled = true
+
+[[fans]]
+id = 3
+name = "Fan 4"
+enabled = true
+
+[[fans]]
+id = 4
+name = "Fan 5"
+enabled = true
+
+[[fans]]
+id = 5
+name = "Fan 6"
+enabled = true
