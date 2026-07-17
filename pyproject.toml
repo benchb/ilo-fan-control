@@ -7,7 +7,9 @@ requires-python = ">=3.13"
 authors = [
     { name = "Alexandre Geraldo" }
 ]
-dependencies = []
+dependencies = [
+    "fastapi[standard-no-fastapi-cloud-cli]>=0.139.0",
+]
 
 [project.scripts]
 ilo-fan-control = "ilo_fan_control:main"
@@ -15,3 +17,27 @@ ilo-fan-control = "ilo_fan_control:main"
 [build-system]
 requires = ["uv_build>=0.11.28,<0.12.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.7.0",
+    "pytest>=9.1.1",
+    "ruff>=0.15.21",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # Pyflakes
+    "I",   # import sorting
+    "UP",  # Python upgrades
+    "B",   # common bugs
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
