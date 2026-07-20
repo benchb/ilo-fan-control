@@ -8,6 +8,7 @@ authors = [
     { name = "Alexandre Geraldo" }
 ]
 dependencies = [
+    "asyncssh>=2.24.0",
     "fastapi[standard-no-fastapi-cloud-cli]>=0.139.0",
 ]
 
