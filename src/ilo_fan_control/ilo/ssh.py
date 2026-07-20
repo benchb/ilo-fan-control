@@ -167,27 +167,3 @@ class ClientSSH:
             fan_id (int): iLO integer ID of the Fan.
         """
         await self.run(f"fan p {fan_id} unlock")
-
-
-if __name__ == "__main__":
-    import asyncio
-
-    async def main() -> None:
-        ssh_client = ClientSSH()
-
-        try:
-            await ssh_client.connect()
-
-            print("Setting speed to max.")
-            await ssh_client.set_fan_speed(1, 100)
-
-            print("Sleeping.")
-            await asyncio.sleep(60)
-
-            print("Setting speed to silent.")
-            await ssh_client.set_fan_speed(1, 7)
-
-        finally:
-            await ssh_client.close()
-
-    asyncio.run(main())

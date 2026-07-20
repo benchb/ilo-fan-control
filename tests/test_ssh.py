@@ -10,16 +10,11 @@ REQUIRED_ENV_VARIABLES = (
     "ILO_ADMIN_PASSWORD",
 )
 
-missing_env_variables = [
-    variable
-    for variable in REQUIRED_ENV_VARIABLES
-    if not os.getenv(variable)
-]
+missing_env_variables = [variable for variable in REQUIRED_ENV_VARIABLES if not os.getenv(variable)]
 
 if missing_env_variables:
     pytest.skip(
-        "Missing required iLO environment variables: "
-        + ", ".join(missing_env_variables),
+        "Missing required iLO environment variables: " + ", ".join(missing_env_variables),
         allow_module_level=True,
     )
 
