@@ -1,0 +1,13 @@
+[[profiles]]
+id = "silent"
+name = "Silent"
+description = "As low as possible for a good night's sleep."
+fa_icon = "moon"
+
+[profiles.fan_settings]
+0 = 8
+1 = 8
+2 = 8
+3 = 8
+4 = 8
+5 = 8

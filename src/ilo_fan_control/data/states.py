@@ -2,23 +2,43 @@ import json
 import logging
 import sqlite3
 import time
+import tomllib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from enum import StrEnum
+from pathlib import Path
 from uuid import uuid4
+from importlib.resources import files
 
-from ilo_fan_control.env import PERSISTENT_DATA_PATH, SILENT_FAN_SETTING
+from ilo_fan_control.env import CONFIGS_PATH, PERSISTENT_DATA_PATH
 from ilo_fan_control.models.fans import FanMode, FanNotFoundError, Fans
 
 logger = logging.getLogger(__name__)
 
+# Setup toml config file
+DEFAULT_CONFIG_FILE = files("ilo_fan_control.defaults").joinpath("profiles.toml")
+CONFIG_FILE = CONFIGS_PATH / "profiles.toml"
+
+
+def ensure_config_file() -> Path:
+    if not CONFIG_FILE.exists():
+        logger.info(f"Creating default fan configuration file at {CONFIG_FILE}")
+        CONFIG_FILE.write_bytes(DEFAULT_CONFIG_FILE.read_bytes())
+
+    return CONFIG_FILE
+
+
+# Setup SQLite database
 DATABASE_PATH = PERSISTENT_DATA_PATH / "states.db"
 
 SCHEMA = """
     CREATE TABLE IF NOT EXISTS profiles (
-        id            TEXT PRIMARY KEY,
-        name          TEXT NOT NULL COLLATE NOCASE UNIQUE,
-        fan_settings  TEXT NOT NULL,
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+        description TEXT NOT NULL DEFAULT '',
+        fa_icon TEXT NOT NULL DEFAULT 'fan',
+        fan_settings TEXT NOT NULL,
         created_at_ms INTEGER NOT NULL,
         updated_at_ms INTEGER NOT NULL
     );
@@ -28,14 +48,6 @@ SCHEMA = """
         value TEXT NOT NULL
     );
 """
-
-
-class ProfileNameAlreadyExistsError(Exception):
-    pass
-
-
-class ProfileNotFoundError(Exception):
-    pass
 
 
 @contextmanager
@@ -65,11 +77,44 @@ def _initialize_database() -> None:
         connection.executescript(SCHEMA)
 
 
-@dataclass()
+# Setup state errors
+class ProfileNameAlreadyExistsError(Exception):
+    pass
+
+
+class ProfileNotFoundError(Exception):
+    pass
+
+
+class ProfileConfigurationError(Exception):
+    pass
+
+
+class BuiltinProfileModificationError(Exception):
+    pass
+
+
+class ProfileSource(StrEnum):
+    BUILTIN = "builtin"
+    USER = "user"
+
+
+@dataclass(frozen=True)
 class Profile:
     id: str
     name: str
+    description: str
+    fa_icon: str
+    source: ProfileSource
     fan_settings: dict[int, int]
+
+    @property
+    def editable(self) -> bool:
+        return self.source is ProfileSource.USER
+
+    @property
+    def deletable(self) -> bool:
+        return self.source is ProfileSource.USER
 
     def get_setting(self, fan_id: int) -> int | None:
         """Gets the profile setting for a given Fan.
@@ -101,7 +146,46 @@ class Profile:
 class Profiles:
     def __init__(self, configured_fans: Fans) -> None:
         self._configured_fans = configured_fans
+        self._config_file: Path = ensure_config_file()
+        self._builtin_profiles: list[Profile] = []
+        self._load_builtin()
         _initialize_database()
+
+    def _load_builtin(self) -> None:
+        try:
+            with self._config_file.open("rb") as file:
+                config = tomllib.load(file)
+        except tomllib.TOMLDecodeError as error:
+            raise ProfileConfigurationError(
+                f"Invalid builtin profile configuration: {error}"
+            ) from error
+
+        builtin_profiles: list[Profile] = []
+
+        for configured_profile in config.get("profiles", []):
+            try:
+                fan_settings = {
+                    int(fan_id): setting
+                    for fan_id, setting in configured_profile["fan_settings"].items()
+                }
+
+                profile = Profile(
+                    id=configured_profile["id"],
+                    name=self._safe_name(configured_profile["name"]),
+                    description=configured_profile.get("description", ""),
+                    fa_icon=configured_profile.get("fa_icon", "fan"),
+                    source=ProfileSource.BUILTIN,
+                    fan_settings=self._safe_settings(
+                        configured_profile["name"],
+                        fan_settings,
+                    ),
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                raise ProfileConfigurationError(f"Invalid builtin profile: {error}") from error
+
+            builtin_profiles.append(profile)
+
+        self._builtin_profiles = builtin_profiles
 
     def _safe_name(self, name: str) -> str:
         """Clears any extra spaces and makes sure the name is not too large.
@@ -174,7 +258,10 @@ class Profiles:
         # Add a default setting for every enabled fan missing from the profile.
         for fan in self._configured_fans.all():
             if fan.enabled:
-                safe_settings.setdefault(fan.id, 0)
+                safe_settings.setdefault(
+                    fan.id,
+                    fan.setting,
+                )
 
         return safe_settings
 
@@ -221,13 +308,18 @@ class Profiles:
         return Profile(
             id=row["id"],
             name=row["name"],
+            description=row["description"],
+            fa_icon=row["fa_icon"],
+            source=ProfileSource.USER,
             fan_settings=self._safe_settings(
                 row["name"],
                 fan_settings,
             ),
         )
 
-    def create(self, name: str, fan_settings: dict[int, int]):
+    def create(
+        self, name: str, fan_settings: dict[int, int], description: str = "", fa_icon: str = "fan"
+    ):
         """Creates a Profile for manual fan speeds in the database.
 
         Args:
@@ -244,10 +336,14 @@ class Profiles:
         profile_id = str(uuid4())
         safe_name = self._safe_name(name)
         safe_settings = self._safe_settings(safe_name, fan_settings)
+        safe_description = description.strip()
+        safe_fa_icon = fa_icon.strip() or "fan"
         timestamp_ms = int(time.time() * 1_000)
         values = (
             profile_id,
             safe_name,
+            safe_description,
+            safe_fa_icon,
             json.dumps(safe_settings, sort_keys=True),
             timestamp_ms,
             timestamp_ms,
@@ -256,7 +352,7 @@ class Profiles:
         try:
             with _connection() as connection:
                 connection.execute(
-                    "INSERT INTO profiles (id, name, fan_settings, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO profiles (id, name, description, fa_icon, fan_settings, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     values,
                 )
 
@@ -265,7 +361,14 @@ class Profiles:
                 raise ProfileNameAlreadyExistsError(safe_name) from error
             raise
 
-        return Profile(id=profile_id, name=safe_name, fan_settings=safe_settings)
+        return Profile(
+            id=profile_id,
+            name=safe_name,
+            description=safe_description,
+            fa_icon=safe_fa_icon,
+            source=ProfileSource.USER,
+            fan_settings=safe_settings,
+        )
 
     def all(self) -> list[Profile]:
         """Retrieves a list of all Profiles in the database.
@@ -277,13 +380,18 @@ class Profiles:
         with _connection() as connection:
             rows = connection.execute(
                 """
-                SELECT id, name, fan_settings
+                SELECT id, name, description, fa_icon, fan_settings
                 FROM profiles
                 ORDER BY name COLLATE NOCASE
                 """
             ).fetchall()
 
-        return [self._from_row(row) for row in rows]
+        user_profiles = [self._from_row(row) for row in rows]
+
+        return [
+            *self._builtin_profiles,
+            *user_profiles,
+        ]
 
     def get(self, profile_id: str) -> Profile:
         """Gets a single Profile data from the database.
@@ -298,10 +406,14 @@ class Profiles:
             Profile: Profile object.
         """
 
+        for profile in self._builtin_profiles:
+            if profile.id == profile_id:
+                return profile
+
         with _connection() as connection:
             row = connection.execute(
                 """
-                SELECT id, name, fan_settings
+                SELECT id, name, description, fa_icon, fan_settings
                 FROM profiles
                 WHERE id = ?
                 """,
@@ -334,6 +446,8 @@ class Profiles:
         profile_id: str,
         *,
         name: str | None = None,
+        description: str | None = None,
+        fa_icon: str | None = None,
         fan_settings: dict[int, int] | None = None,
     ) -> Profile:
         """Updates an existing Profile in the database
@@ -353,7 +467,18 @@ class Profiles:
 
         current_profile = self.get(profile_id)
 
+        if not current_profile.editable:
+            raise BuiltinProfileModificationError(
+                f"Builtin profile {profile_id!r} cannot be updated."
+            )
+
         safe_name = self._safe_name(name) if name is not None else current_profile.name
+
+        safe_description = (
+            description.strip() if description is not None else current_profile.description
+        )
+
+        safe_fa_icon = fa_icon.strip() or "fan" if fa_icon is not None else current_profile.fa_icon
 
         safe_settings = (
             self._safe_settings(
@@ -373,13 +498,20 @@ class Profiles:
                     UPDATE profiles
                     SET
                         name = ?,
+                        description = ?,
+                        fa_icon = ?,
                         fan_settings = ?,
                         updated_at_ms = ?
                     WHERE id = ?
                     """,
                     (
                         safe_name,
-                        json.dumps(safe_settings, sort_keys=True),
+                        safe_description,
+                        safe_fa_icon,
+                        json.dumps(
+                            safe_settings,
+                            sort_keys=True,
+                        ),
                         updated_at_ms,
                         profile_id,
                     ),
@@ -393,6 +525,9 @@ class Profiles:
         return Profile(
             id=profile_id,
             name=safe_name,
+            description=safe_description,
+            fa_icon=safe_fa_icon,
+            source=ProfileSource.USER,
             fan_settings=safe_settings,
         )
 
@@ -405,6 +540,12 @@ class Profiles:
         Raises:
             ProfileNotFoundError: If the UUID was not found in the database.
         """
+        profile = self.get(profile_id)
+
+        if not profile.deletable:
+            raise BuiltinProfileModificationError(
+                f"Builtin profile {profile_id!r} cannot be deleted."
+            )
 
         with _connection() as connection:
             cursor = connection.execute(
@@ -441,7 +582,7 @@ class AppState:
             dict[int, int]: Default settings for enabled fans.
         """
 
-        return {fan.id: SILENT_FAN_SETTING for fan in self._configured_fans.all() if fan.enabled}
+        return {fan.id: fan.setting for fan in self._configured_fans.all() if fan.enabled}
 
     def _safe_settings(
         self,
@@ -536,19 +677,20 @@ class AppState:
 
         # Initialize Fans state from the last known AppState
         if self.mode == FanMode.MANUAL:
-            # Set each Fan to the last stored setting
-            self._configured_fans.set_manual(self.manual_fan_settings.copy())
+            selected_profile_id = raw_state.get(
+                "selected_profile_id",
+            )
 
-            # Set the selected profile if valid
-            selected_profile_id = raw_state.get("selected_profile_id", None)
-            if self._profiles.exists(selected_profile_id):
-                self.selected_profile_id = selected_profile_id
+            if isinstance(selected_profile_id, str) and self._profiles.exists(selected_profile_id):
+                profile = self._profiles.get(selected_profile_id)
+
+                self.selected_profile_id = profile.id
+                self.manual_fan_settings = profile.fan_settings.copy()
             else:
                 self.selected_profile_id = None
 
-        elif self.mode == FanMode.SILENT:
-            self._configured_fans.set_silent()
-            self.selected_profile_id = None
+            self._configured_fans.set_manual(self.manual_fan_settings.copy())
+
         else:
             self._configured_fans.set_auto()
             self.selected_profile_id = None
@@ -605,13 +747,6 @@ class AppState:
         if fan_settings is not None:
             self.manual_fan_settings = self._safe_settings(fan_settings)
 
-        self.save()
-
-    def set_silent(self) -> None:
-        """Stores silent mode as the current mode."""
-
-        self.mode = FanMode.SILENT
-        self.selected_profile_id = None
         self.save()
 
     def set_profile(self, profile_id: str) -> None:
