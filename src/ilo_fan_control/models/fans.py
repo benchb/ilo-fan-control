@@ -5,24 +5,12 @@ from enum import StrEnum
 from importlib.resources import files
 from pathlib import Path
 
-from ilo_fan_control.env import CONFIGS_PATH, SILENT_FAN_SETTING
+from ilo_fan_control.env import CONFIGS_PATH
+from ilo_fan_control.ilo.redfish import FanReading
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CONFIG_FILE = files("ilo_fan_control.defaults").joinpath("fans.toml")
-CONFIG_FILE = CONFIGS_PATH / "fans.toml"
-
-
-def ensure_config_file() -> Path:
-    if not CONFIG_FILE.exists():
-        logger.info(f"Creating default fan configuration file at {CONFIG_FILE}")
-        CONFIG_FILE.write_bytes(DEFAULT_CONFIG_FILE.read_bytes())
-
-    return CONFIG_FILE
-
-
-class FanConfigurationError(Exception):
-    pass
+DEFAULT_FAN_SETTING = 10
 
 
 class FanNotFoundError(Exception):
@@ -31,7 +19,6 @@ class FanNotFoundError(Exception):
 
 class FanMode(StrEnum):
     AUTO = "auto"
-    SILENT = "silent"
     MANUAL = "manual"
 
 
@@ -41,15 +28,28 @@ class Fan:
     name: str
     mode: FanMode = FanMode.AUTO
     speed: int | None = None
-    setting: int = SILENT_FAN_SETTING
+    setting: int = DEFAULT_FAN_SETTING
     enabled: bool = True
 
-    def update_speed(self, speed: int) -> None:
+    def update_state(self, state: bool) -> None:
+        """Updates whether the Fan is enabled or not in iLO.
+
+        Args:
+            state (bool): True if Fan is Enabled, False otherwise.
+        """
+
+        self.enabled = state
+
+    def update_speed(self, speed: int | None) -> None:
         """Updates the Fan speed reading.
 
         Args:
             speed (int): Speed reading from iLO API. (in %)
         """
+
+        if speed is None:
+            self.speed = None
+            return
 
         if not 0 <= speed <= 100:
             logger.error(
@@ -69,18 +69,6 @@ class Fan:
         # TODO: Call iLO
 
         self.mode = FanMode.AUTO
-
-    def set_silent(self):
-        """Places iLO Fan in manual speed. It uses whatever is the 'ILO_FAN_CONTROL_SILENT_FAN_SETTING'."""
-
-        if not self.enabled:
-            logger.debug(f"Fan id number {self.id} is disabled. Skipping.")
-            return
-
-        # TODO: Call iLO
-        ...
-
-        self.mode = FanMode.SILENT
 
     def set_speed(self, setting: int):
         """Places iLO Fan in manual speed. It will use a user manual setting.
@@ -121,65 +109,20 @@ class Fan:
 
 
 class Fans:
-    def __init__(self):
-        self._config_file = ensure_config_file()
-        self._fans = self._load(self._config_file)
-        self._fans_by_id = {fan.id: fan for fan in self._fans}
+    def __init__(self, fan_readings: list[FanReading]):
+        self._fans: list[Fan] = []
+        self._fans_by_id: dict[int, Fan] = {}
 
-        if len(self._fans_by_id) != len(self._fans):
-            raise FanConfigurationError("Duplicate fan IDs in configuration.")
+        for reading in fan_readings:
+            fan = Fan(
+                id=reading.id,
+                name=reading.name,
+                speed=reading.speed_percentage,
+                enabled=reading.state == "Enabled",
+            )
 
-    @staticmethod
-    def _load(
-        config_file: Path,
-    ) -> list[Fan]:
-        """Loads the Fans list from the TOML configuration file.
-
-        Args:
-            config_file (Path): _description_
-
-        Raises:
-            FanConfigurationError: Raised if any problem is found with the TOML file or its contents
-
-        Returns:
-            list[Fan]: List with Fan objects
-        """
-
-        try:
-            with config_file.open("rb") as file:
-                config = tomllib.load(file)
-        except tomllib.TOMLDecodeError as error:
-            raise FanConfigurationError(f"Invalid fan configuration: {error}") from error
-
-        configured_fans = config.get("fans")
-
-        if not isinstance(configured_fans, list):
-            raise FanConfigurationError("Missing [[fans]] configuration.")
-
-        fans: list[Fan] = []
-
-        for configured_fan in configured_fans:
-            try:
-                fan = Fan(
-                    id=configured_fan["id"],
-                    name=configured_fan["name"],
-                    enabled=configured_fan.get(
-                        "enabled",
-                        True,
-                    ),
-                )
-            except KeyError as error:
-                raise FanConfigurationError(f"Missing fan property: {error.args[0]}") from error
-
-            fans.append(fan)
-
-        logger.info(
-            "Loaded %d fans from %s",
-            len(fans),
-            config_file,
-        )
-
-        return fans
+            self._fans.append(fan)
+            self._fans_by_id[fan.id] = fan
 
     def all(self) -> list[Fan]:
         """Return a list with the configured Fan instances.
@@ -229,27 +172,29 @@ class Fans:
 
         return {fan.id: fan.setting for fan in self._fans if fan.enabled}
 
-    def update_speed(self, fan_id: int, speed: int) -> None:
-        """Updates the speed reading value.
+    def update_readings(self, fan_readings: list[FanReading]) -> None:
+        """Updates the fan readings.
 
         Args:
-            fan_id (int): Integer Fan ID.
-            speed (int): New reading value (in %).
+            fan_readings (list[FanReading]): List of FanReading instances from the iLO Rest Client.
         """
 
-        self.get(fan_id).update_speed(speed)
+        for reading in fan_readings:
+            fan = self.get(reading.id)
+            enabled = reading.state == "Enabled"
+
+            fan.update_state(enabled)
+
+            if enabled:
+                fan.update_speed(reading.speed_percentage)
+            else:
+                fan.update_speed(None)
 
     def set_auto(self) -> None:
         """Sets all the Fans to auto mode."""
 
         for fan in self._fans:
             fan.set_auto()
-
-    def set_silent(self) -> None:
-        """Sets all the Fans to silent mode."""
-
-        for fan in self._fans:
-            fan.set_silent()
 
     def set_manual(self, fan_settings: dict[int, int]) -> None:
         """Sets all the fans to manual mode at once.
