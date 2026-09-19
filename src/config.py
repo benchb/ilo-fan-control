@@ -22,6 +22,8 @@ FANS = [
     {"id": 3, "name": "Fan 4", "verbose-name": "Fan #4", "enabled": True},
     {"id": 4, "name": "Fan 5", "verbose-name": "Fan #5", "enabled": True},
     {"id": 5, "name": "Fan 6", "verbose-name": "Fan #6", "enabled": True},
+    {"id": 6, "name": "Fan 7", "verbose-name": "Fan #7", "enabled": True}, 
+    {"id": 7, "name": "Fan 8", "verbose-name": "Fan #8", "enabled": True},
 ]
 
 TEMPERATURE_SENSORS = [
